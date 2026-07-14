@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "Samet Watchparty",
+  "version": "0.1.0",
+  "description": "Watchparty side panel with Supabase-backed rooms and realtime sync.",
+  "action": {
+    "default_title": "Samet Watchparty"
+  },
+  "background": {
+    "service_worker": "assets/background.js",
+    "type": "module"
+  },
+  "permissions": ["storage", "tabs", "activeTab", "sidePanel", "scripting", "webNavigation"],
+  "host_permissions": ["<all_urls>"],
+  "side_panel": {
+    "default_path": "sidepanel/index.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["assets/content.js"],
+      "run_at": "document_idle",
+      "all_frames": true,
+      "match_about_blank": true,
+      "match_origin_as_fallback": true
+    }
+  ]
+}

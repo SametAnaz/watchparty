@@ -1,0 +1,10 @@
+project_id = "samet-watchparty"
+
+[api]
+enabled = true
+
+[db]
+port = 54322
+
+[realtime]
+enabled = true

@@ -1,0 +1,25 @@
+{
+  "name": "@samet-watchparty/extension",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite build --watch",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@samet-watchparty/shared-types": "workspace:*",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "@supabase/supabase-js": "^2.56.0"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.320",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^4.7.0",
+    "vite": "^7.0.4",
+    "typescript": "^5.8.3"
+  }
+}
