@@ -1,6 +1,6 @@
 import type { RealtimeChannel } from "@supabase/supabase-js";
 import type { RoomPresence } from "@samet-watchparty/shared-types";
-import type { PlaybackEvent } from "./protocol";
+import type { PlaybackEvent, ReactionEvent } from "./protocol";
 import { supabase } from "./supabase";
 
 export const roomTopic = (roomId: string) => `room:${roomId}`;
@@ -23,6 +23,7 @@ export class RoomRealtime {
     onPlayback: (event: PlaybackEvent) => void,
     onPresence: (state: Record<string, RoomPresence[]>) => void,
     onMessageChange: () => void,
+    onReaction: (event: ReactionEvent) => void,
   ) {
     const version = ++this.version;
     await this.removeCurrentChannel();
@@ -39,6 +40,9 @@ export class RoomRealtime {
       })
       .on("broadcast", { event: "presence" }, ({ payload }) => {
         this.rememberPresence(payload as RoomPresence, onPresence);
+      })
+      .on("broadcast", { event: "reaction" }, ({ payload }) => {
+        onReaction(payload as ReactionEvent);
       })
       .on("broadcast", { event: "message_changed" }, onMessageChange);
 
@@ -78,6 +82,10 @@ export class RoomRealtime {
 
   async notifyMessageChange() {
     await this.httpSend("message_changed", { changedAt: new Date().toISOString() });
+  }
+
+  async sendReaction(event: ReactionEvent) {
+    await this.httpSend("reaction", event);
   }
 
   async disconnect() {

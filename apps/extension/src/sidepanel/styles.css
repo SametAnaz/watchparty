@@ -67,7 +67,7 @@ h2 { font-size: 16px; letter-spacing: -0.015em; }
   gap: 11px;
 }
 
-.room-shell { padding-bottom: 18px; }
+.room-shell { padding-bottom: 8px; }
 
 .auth-shell {
   min-height: 100vh;
@@ -405,6 +405,8 @@ h2 { font-size: 16px; letter-spacing: -0.015em; }
 .message-actions button:hover { color: white; background: rgba(255, 255, 255, 0.05); }
 .message-actions button.liked { color: #f0abfc; }
 .message-actions button.liked svg { fill: currentColor; }
+.message-actions button:disabled { cursor: default; opacity: 0.72; }
+.message-actions button:disabled:hover { background: transparent; }
 
 .load-older { align-self: center; border: 1px solid var(--border); border-radius: 999px; padding: 5px 10px; background: rgba(139, 92, 246, 0.08); color: #c4b5fd; font-size: 9px; cursor: pointer; }
 .empty-chat { margin: auto; display: grid; place-items: center; gap: 7px; color: var(--subtle); font-size: 11px; }
@@ -431,6 +433,80 @@ h2 { font-size: 16px; letter-spacing: -0.015em; }
 .field-hint { color: var(--subtle); font-size: 9px; font-weight: 450; }
 .profile-notice { padding: 9px 10px; border: 1px solid rgba(167, 139, 250, 0.14); border-radius: 9px; background: rgba(139, 92, 246, 0.08); color: #d8cdf1; font-size: 10px; line-height: 1.4; }
 
+.reaction-dock {
+  position: sticky;
+  z-index: 46;
+  bottom: 7px;
+  width: min(344px, calc(100vw - 24px));
+  min-height: 47px;
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 15px;
+  background: linear-gradient(145deg, rgba(35, 23, 55, 0.94), rgba(17, 11, 28, 0.91));
+  justify-self: center;
+  box-shadow: 0 14px 38px rgba(3, 1, 8, 0.48), inset 0 1px rgba(255, 255, 255, 0.035);
+}
+
+.reaction-dock button {
+  display: grid;
+  place-items: center;
+  height: 37px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 11px;
+  background: transparent;
+  font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif;
+  font-size: 21px;
+  cursor: pointer;
+  transition: transform 140ms ease, background 140ms ease, border-color 140ms ease;
+}
+
+.reaction-dock button:hover {
+  border-color: rgba(196, 181, 253, 0.16);
+  background: rgba(139, 92, 246, 0.13);
+  transform: translateY(-3px) scale(1.1);
+}
+
+.reaction-dock button:active { transform: translateY(0) scale(0.9); }
+
+.reaction-layer {
+  position: fixed;
+  z-index: 45;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.reaction-bubble {
+  position: absolute;
+  bottom: 8px;
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  opacity: 0;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 50%;
+  background: radial-gradient(circle at 34% 25%, rgba(255, 255, 255, 0.2), rgba(139, 92, 246, 0.12) 56%, rgba(15, 9, 25, 0.18));
+  box-shadow: inset 0 0 12px rgba(255, 255, 255, 0.04), 0 8px 22px rgba(8, 3, 16, 0.28);
+  font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif;
+  animation-name: reaction-float;
+  animation-timing-function: cubic-bezier(0.2, 0.72, 0.22, 1);
+  animation-fill-mode: forwards;
+  will-change: transform, opacity;
+}
+
+@keyframes reaction-float {
+  0% { opacity: 0; transform: translate(-50%, 16px) rotate(0deg) scale(0.42); }
+  14% { opacity: 1; transform: translate(-50%, -5px) rotate(0deg) scale(1); }
+  48% { opacity: 0.96; transform: translate(calc(-50% + var(--reaction-drift)), -24vh) rotate(var(--reaction-rotation)) scale(1.04); }
+  78% { opacity: 0.72; }
+  100% { opacity: 0; transform: translate(calc(-50% - var(--reaction-drift)), -48vh) rotate(var(--reaction-rotation)) scale(0.72); }
+}
+
 .form-error { margin: 0; border: 1px solid rgba(251, 113, 133, 0.18); border-radius: 11px; padding: 9px 11px; background: rgba(251, 113, 133, 0.09); color: #fecdd3; font-size: 11px; overflow-wrap: anywhere; }
 .muted { margin-top: 8px; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .empty-state { padding: 18px 4px; color: var(--muted); font-size: 11px; text-align: center; }
@@ -445,4 +521,10 @@ h2 { font-size: 16px; letter-spacing: -0.015em; }
   .brand-copy strong { max-width: 150px; }
   .chat-card { grid-template-rows: auto minmax(250px, 40vh) auto auto; }
   .message-list { min-height: 250px; max-height: 40vh; }
+  .reaction-dock { width: calc(100vw - 16px); bottom: 7px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reaction-bubble { animation-duration: 700ms !important; }
+  .reaction-dock button { transition: none; }
 }

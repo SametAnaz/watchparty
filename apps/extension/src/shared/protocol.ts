@@ -11,3 +11,13 @@ export interface PlaybackEvent {
   playbackRate: number;
   paused: boolean;
 }
+
+export type ReactionEmoji = "😂" | "❤️" | "😮" | "😡" | "😭" | "🤠";
+
+export interface ReactionEvent {
+  eventId: string;
+  senderId: string;
+  emoji: ReactionEmoji;
+  anchorX: number;
+  sentAt: string;
+}

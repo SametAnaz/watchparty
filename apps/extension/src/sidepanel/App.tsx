@@ -1,9 +1,10 @@
 import { FormEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import type { Session } from "@supabase/supabase-js";
 import type { RoomPresence } from "@samet-watchparty/shared-types";
 import { RoomRealtime } from "../shared/room-realtime";
 import { supabase } from "../shared/supabase";
-import type { PlaybackEvent } from "../shared/protocol";
+import type { PlaybackEvent, ReactionEmoji, ReactionEvent } from "../shared/protocol";
 import {
   ArrowLeftIcon,
   Avatar,
@@ -38,11 +39,22 @@ type Message = {
 };
 type MessageRow = Pick<Message, "id" | "sender_id" | "body" | "reply_to" | "created_at" | "deleted_at">;
 type Media = { title: string; mediaTime: number; duration: number; paused: boolean; detected: boolean; fingerprint: string | null; pageUrl: string | null };
+type ReactionParticle = { x: number; drift: number; delay: number; duration: number; size: number; rotation: number };
+type ReactionBurst = ReactionEvent & { burstId: string; particles: ReactionParticle[] };
 
 const clientId = crypto.randomUUID();
 const presenceJoinedAt = new Date().toISOString();
 const MESSAGE_PAGE_SIZE = 40;
 const MAX_AVATAR_SIZE = 5 * 1024 * 1024;
+const REACTIONS: { emoji: ReactionEmoji; label: string }[] = [
+  { emoji: "😂", label: "Gülme" },
+  { emoji: "❤️", label: "Kalp" },
+  { emoji: "😮", label: "Şaşırma" },
+  { emoji: "😡", label: "Kızma" },
+  { emoji: "😭", label: "Ağlama" },
+  { emoji: "🤠", label: "Kovboy" },
+];
+const REACTION_EMOJIS = new Set<ReactionEmoji>(REACTIONS.map((reaction) => reaction.emoji));
 
 function displayNameFromEmail(email: string | undefined) {
   return email?.split("@")[0]?.trim() || "Watchparty kullanıcısı";
@@ -111,18 +123,23 @@ export function App() {
   const [avatarPreview, setAvatarPreview] = useState<string | null>(null);
   const [profileSaving, setProfileSaving] = useState(false);
   const [profileNotice, setProfileNotice] = useState<string | null>(null);
+  const [reactionBursts, setReactionBursts] = useState<ReactionBurst[]>([]);
 
   const realtime = useRef(new RoomRealtime());
   const logicalClock = useRef(0);
   const activeTabId = useRef<number | undefined>(undefined);
   const activeFrameId = useRef<number | undefined>(undefined);
   const mediaFingerprintRef = useRef<string | null>(null);
+  const mediaReadyRef = useRef(false);
+  const pendingRemotePlaybackRef = useRef<PlaybackEvent | null>(null);
+  const joinedMediaRef = useRef<{ tabId: number | null; fingerprint: string; pageUrl: string | null } | null>(null);
   const messageLimitRef = useRef(MESSAGE_PAGE_SIZE);
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const scrollToBottomRef = useRef(true);
   const restoreScrollRef = useRef<{ height: number; top: number } | null>(null);
   const profileMenuRef = useRef<HTMLDivElement | null>(null);
   const objectUrlRef = useRef<string | null>(null);
+  const reactionTimersRef = useRef<number[]>([]);
 
   const activeRoomId = activeRoom?.id;
   const currentUserId = session?.user.id;
@@ -212,6 +229,26 @@ export function App() {
     }));
   }, [currentUserId]);
 
+  const showReaction = useCallback((event: ReactionEvent) => {
+    if (!REACTION_EMOJIS.has(event.emoji)) return;
+    const anchorX = 50;
+    const burstId = `${event.eventId}:${crypto.randomUUID()}`;
+    const particles = Array.from({ length: 6 }, (_, index): ReactionParticle => ({
+      x: (Math.random() - 0.5) * 34,
+      drift: (Math.random() - 0.5) * 86,
+      delay: index * 45 + Math.random() * 90,
+      duration: 1450 + Math.random() * 650,
+      size: 20 + Math.random() * 13,
+      rotation: (Math.random() - 0.5) * 48,
+    }));
+    setReactionBursts((bursts) => [...bursts.slice(-11), { ...event, anchorX, burstId, particles }]);
+    const timer = window.setTimeout(() => {
+      setReactionBursts((bursts) => bursts.filter((burst) => burst.burstId !== burstId));
+      reactionTimersRef.current = reactionTimersRef.current.filter((item) => item !== timer);
+    }, 2600);
+    reactionTimersRef.current.push(timer);
+  }, []);
+
   useEffect(() => {
     let mounted = true;
     void supabase.auth.getSession().then(async ({ data, error: sessionError }) => {
@@ -243,6 +280,7 @@ export function App() {
 
   useEffect(() => () => {
     if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
+    for (const timer of reactionTimersRef.current) window.clearTimeout(timer);
   }, []);
 
   useEffect(() => {
@@ -269,7 +307,11 @@ export function App() {
         logicalClock.current = Math.max(logicalClock.current, event.logicalClock) + 1;
         const sameMedia = !event.mediaFingerprint || event.mediaFingerprint === mediaFingerprintRef.current;
         if (event.senderId !== currentUserId && sameMedia && activeTabId.current !== undefined) {
-          void chrome.runtime.sendMessage({ type: "WATCHPARTY_APPLY_REMOTE_PLAYBACK", tabId: activeTabId.current, frameId: activeFrameId.current, ...event });
+          if (!mediaReadyRef.current) {
+            pendingRemotePlaybackRef.current = event;
+          } else {
+            void chrome.runtime.sendMessage({ type: "WATCHPARTY_APPLY_REMOTE_PLAYBACK", tabId: activeTabId.current, frameId: activeFrameId.current, ...event });
+          }
         } else if (event.senderId !== currentUserId && !sameMedia) {
           console.debug("[Watchparty Playback] ignored: media mismatch", { remote: event.mediaFingerprint, local: mediaFingerprintRef.current });
         }
@@ -280,32 +322,44 @@ export function App() {
         scrollToBottomRef.current = !list || list.scrollHeight - list.scrollTop - list.clientHeight < 96;
         void loadMessages(activeRoomId).catch((loadError) => setError(messageFromError(loadError)));
       },
+      showReaction,
     ).catch((connectError) => setError(messageFromError(connectError)));
     void chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
       if (tab?.id === undefined) return;
       activeTabId.current = tab.id;
+      mediaReadyRef.current = false;
       return chrome.runtime.sendMessage({ type: "WATCHPARTY_ENSURE_CONTENT", tabId: tab.id });
     });
     return () => { void realtime.current.disconnect(); };
-  }, [activeRoomId, currentUserId, loadMembers, loadMessages]);
+  }, [activeRoomId, currentUserId, loadMembers, loadMessages, showReaction]);
 
   useEffect(() => {
     if (!currentUserId || !activeRoomId) return;
     const listener = (event: { type: string; [key: string]: unknown }) => {
       if (event.type === "WATCHPARTY_VIDEO_STATUS") {
+        if (typeof event.tabId === "number" && activeTabId.current !== undefined && event.tabId !== activeTabId.current) return;
         if (typeof event.tabId === "number") activeTabId.current = event.tabId;
         if (typeof event.frameId === "number") activeFrameId.current = event.frameId;
+        const rawPageUrl = typeof event.pageUrl === "string" ? event.pageUrl : null;
+        let fingerprint = typeof event.mediaFingerprint === "string" ? event.mediaFingerprint : null;
+        const joinedMedia = joinedMediaRef.current;
+        if (joinedMedia && typeof event.tabId === "number" && joinedMedia.tabId === event.tabId) {
+          if (joinedMedia.pageUrl === null && rawPageUrl) joinedMedia.pageUrl = rawPageUrl;
+          else if (rawPageUrl && joinedMedia.pageUrl !== rawPageUrl) joinedMediaRef.current = null;
+          if (joinedMediaRef.current) fingerprint = joinedMedia.fingerprint;
+        }
         const nextMedia: Media = {
           title: String(event.title ?? (event.videoDetected ? "Medya bulundu" : "Medya bekleniyor")),
           mediaTime: Number(event.mediaTime ?? 0),
           duration: Number(event.duration ?? 0),
           paused: Boolean(event.paused),
           detected: Boolean(event.videoDetected),
-          fingerprint: typeof event.mediaFingerprint === "string" ? event.mediaFingerprint : null,
-          pageUrl: typeof event.pageUrl === "string" ? event.pageUrl : null,
+          fingerprint,
+          pageUrl: rawPageUrl,
         };
         setMedia(nextMedia);
         mediaFingerprintRef.current = nextMedia.fingerprint;
+        mediaReadyRef.current = nextMedia.detected;
         void realtime.current.trackPresence({
           userId: currentUserId,
           displayName: currentDisplayNameRef.current,
@@ -317,9 +371,17 @@ export function App() {
           pageUrl: nextMedia.pageUrl,
           joinedAt: presenceJoinedAt,
         }).catch((presenceError) => setError(messageFromError(presenceError)));
+        const pendingPlayback = pendingRemotePlaybackRef.current;
+        if (pendingPlayback && nextMedia.detected && activeTabId.current !== undefined) {
+          const samePendingMedia = !pendingPlayback.mediaFingerprint || pendingPlayback.mediaFingerprint === nextMedia.fingerprint;
+          if (samePendingMedia) {
+            pendingRemotePlaybackRef.current = null;
+            void chrome.runtime.sendMessage({ type: "WATCHPARTY_APPLY_REMOTE_PLAYBACK", tabId: activeTabId.current, frameId: activeFrameId.current, ...pendingPlayback });
+          }
+        }
       }
       if (event.type === "WATCHPARTY_LOCAL_PLAYBACK" && activeTabId.current !== undefined) {
-        if (typeof event.tabId === "number") activeTabId.current = event.tabId;
+        if (typeof event.tabId === "number" && event.tabId !== activeTabId.current) return;
         if (typeof event.frameId === "number") activeFrameId.current = event.frameId;
         logicalClock.current += 1;
         const playback: PlaybackEvent = {
@@ -340,6 +402,25 @@ export function App() {
     chrome.runtime.onMessage.addListener(listener);
     return () => chrome.runtime.onMessage.removeListener(listener);
   }, [activeRoomId, currentUserId]);
+
+  useEffect(() => {
+    const handleActivated = ({ tabId }: chrome.tabs.TabActiveInfo) => {
+      activeTabId.current = tabId;
+      activeFrameId.current = undefined;
+      mediaReadyRef.current = false;
+      pendingRemotePlaybackRef.current = null;
+      const joinedMedia = joinedMediaRef.current;
+      if (joinedMedia?.tabId === null) joinedMedia.tabId = tabId;
+      if (joinedMedia?.tabId === tabId) mediaFingerprintRef.current = joinedMedia.fingerprint;
+      else {
+        joinedMediaRef.current = null;
+        mediaFingerprintRef.current = null;
+      }
+      void chrome.runtime.sendMessage({ type: "WATCHPARTY_ENSURE_CONTENT", tabId }).catch(() => undefined);
+    };
+    chrome.tabs.onActivated.addListener(handleActivated);
+    return () => chrome.tabs.onActivated.removeListener(handleActivated);
+  }, []);
 
   useLayoutEffect(() => {
     const list = messageListRef.current;
@@ -403,6 +484,7 @@ export function App() {
 
   async function toggleLike(message: Message) {
     if (!session || !activeRoom) return;
+    if (message.sender_id === session.user.id) return;
     setError(null);
     const query = supabase.from("message_reactions");
     const { error: reactionError } = message.likedByMe
@@ -422,6 +504,22 @@ export function App() {
     try { await loadMessages(activeRoom.id); }
     catch (loadError) { setError(messageFromError(loadError)); }
     finally { setLoadingOlder(false); }
+  }
+
+  async function sendLiveReaction(emoji: ReactionEmoji) {
+    if (!session || !activeRoom) return;
+    const event: ReactionEvent = {
+      eventId: crypto.randomUUID(),
+      senderId: session.user.id,
+      emoji,
+      anchorX: 50,
+      sentAt: new Date().toISOString(),
+    };
+    showReaction(event);
+    await realtime.current.sendReaction(event).catch((reactionError) => {
+      console.warn("[Watchparty Reaction] delivery failed", reactionError);
+      setError(messageFromError(reactionError));
+    });
   }
 
   async function signOut() {
@@ -454,7 +552,8 @@ export function App() {
 
   async function saveProfile(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!session || !profileName.trim()) return;
+    if (!session) return;
+    if (!profileName.trim()) { setProfileNotice("İsim boş bırakılamaz."); return; }
     setProfileSaving(true); setProfileNotice(null);
     try {
       let avatarUrl = currentProfile?.avatar_url ?? null;
@@ -481,7 +580,20 @@ export function App() {
       const { error: profileError } = await supabase.from("profiles").update({ display_name: profileName.trim(), avatar_url: avatarUrl }).eq("id", session.user.id);
       if (profileError) throw profileError;
       await loadProfiles();
-      if (activeRoom) await loadMembers(activeRoom.id);
+      if (activeRoom) {
+        await loadMembers(activeRoom.id);
+        await realtime.current.trackPresence({
+          userId: session.user.id,
+          displayName: profileName.trim(),
+          clientId,
+          sessionId: null,
+          videoDetected: media.detected,
+          mediaFingerprint: media.fingerprint,
+          mediaTitle: media.title,
+          pageUrl: media.pageUrl,
+          joinedAt: presenceJoinedAt,
+        }).catch((presenceError) => console.warn("[Watchparty Presence] profile refresh failed", presenceError));
+      }
       setProfilePassword(""); setAvatarFile(null);
       setProfileNotice(authChanges.email ? "Profil kaydedildi. Yeni e-posta adresini doğrulaman gerekebilir." : "Profil kaydedildi.");
     } catch (saveError) {
@@ -508,20 +620,23 @@ export function App() {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (tab?.id === undefined) throw new Error("Aktif sekme bulunamadı.");
       activeTabId.current = tab.id;
+      mediaReadyRef.current = false;
       await chrome.runtime.sendMessage({ type: "WATCHPARTY_ENSURE_CONTENT", tabId: tab.id });
     } catch (refreshError) { setError(messageFromError(refreshError)); }
   }
 
-  async function joinRemoteMedia(pageUrl: string) {
+  async function joinRemoteMedia(pageUrl: string, mediaFingerprint: string | null) {
     try {
       const url = new URL(pageUrl);
       if (!url.protocol.startsWith("http")) throw new Error("Bu medya bağlantısı açılamıyor.");
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (tab?.id === undefined) throw new Error("Aktif sekme bulunamadı.");
-      activeTabId.current = tab.id;
       setMedia({ title: "Medya açılıyor…", mediaTime: 0, duration: 0, paused: true, detected: false, fingerprint: null, pageUrl });
-      mediaFingerprintRef.current = null;
-      await chrome.tabs.update(tab.id, { url: url.href });
+      joinedMediaRef.current = mediaFingerprint ? { tabId: null, fingerprint: mediaFingerprint, pageUrl: null } : null;
+      mediaFingerprintRef.current = mediaFingerprint;
+      mediaReadyRef.current = false;
+      const tab = await chrome.tabs.create({ url: url.href, active: true });
+      if (tab.id === undefined) throw new Error("Yeni medya sekmesi açılamadı.");
+      activeTabId.current = tab.id;
+      if (joinedMediaRef.current) joinedMediaRef.current.tabId = tab.id;
     } catch (joinError) { setError(messageFromError(joinError)); }
   }
 
@@ -604,7 +719,7 @@ export function App() {
     <section className="media-card glass-panel">
       <div className="section-head"><div><span className="section-kicker">Şu an izleniyor</span><span className={`media-state${media.detected ? " active" : ""}`}>{media.detected ? (media.paused ? "Duraklatıldı" : "Oynatılıyor") : "Medya bekleniyor"}</span></div><button className="ghost-icon-button" type="button" onClick={() => void refreshMedia()} aria-label="Medyayı yenile"><RefreshIcon /></button></div>
       {mediaPageUrl
-        ? <button className="media-title-button" type="button" onClick={() => void joinRemoteMedia(mediaPageUrl)}><span>{mediaTitle}</span><small>{remoteWatcher?.displayName} izliyor · Açmak için tıkla</small></button>
+        ? <button className="media-title-button" type="button" onClick={() => void joinRemoteMedia(mediaPageUrl, remoteWatcher?.mediaFingerprint ?? null)}><span>{mediaTitle}</span><small>{remoteWatcher?.displayName} izliyor · Açmak için tıkla</small></button>
         : <div className="media-title-static"><h3>{mediaTitle}</h3><small>{media.detected ? "Bu sekmedeki medya" : "Video bulunan bir sekme aç"}</small></div>}
       <div className="progress"><div className="progress-bar" style={{ width: `${progress}%` }} /></div>
       <div className="media-timeline"><span>{formatTime(media.mediaTime)}</span><span>{formatTime(media.duration)}</span></div>
@@ -625,7 +740,7 @@ export function App() {
                 <p>{message.deleted_at ? "Bu mesaj silindi." : message.body}</p>
               </div>
               {!message.deleted_at && <div className="message-actions">
-                <button type="button" className={message.likedByMe ? "liked" : ""} onClick={() => void toggleLike(message)} aria-label={message.likedByMe ? "Beğeniyi kaldır" : "Mesajı beğen"}><HeartIcon size={14} />{message.likeCount > 0 && <span>{message.likeCount}</span>}</button>
+                <button type="button" className={message.likeCount > 0 ? "liked" : ""} onClick={() => void toggleLike(message)} disabled={own} aria-label={own ? "Kendi mesajını beğenemezsin" : message.likedByMe ? "Beğeniyi kaldır" : "Mesajı beğen"} title={own ? "Kendi mesajını beğenemezsin" : undefined}><HeartIcon size={14} />{message.likeCount > 0 && <span>{message.likeCount}</span>}</button>
                 <button type="button" onClick={() => { setReplyingTo(message); document.getElementById("message")?.focus(); }} aria-label="Mesajı yanıtla"><ReplyIcon size={14} /></button>
               </div>}
             </div>
@@ -637,6 +752,23 @@ export function App() {
       <form className="composer" onSubmit={(event) => void sendMessage(event)}><label className="sr-only" htmlFor="message">Mesaj yaz</label><input id="message" value={messageBody} onChange={(event) => setMessageBody(event.target.value)} placeholder={replyingTo ? "Yanıtını yaz…" : "Mesaj yaz…"} maxLength={4000} /><button type="submit" aria-label="Gönder" disabled={!messageBody.trim()}><SendIcon /></button></form>
     </section>
     {error && <p className="form-error">{error}</p>}
+    <div className="reaction-layer" aria-hidden="true">
+      {reactionBursts.flatMap((burst) => burst.particles.map((particle, index) => <span
+        className="reaction-bubble"
+        key={`${burst.burstId}:${index}`}
+        style={{
+          left: `calc(${burst.anchorX}% + ${particle.x}px)`,
+          fontSize: `${particle.size}px`,
+          animationDelay: `${particle.delay}ms`,
+          animationDuration: `${particle.duration}ms`,
+          "--reaction-drift": `${particle.drift}px`,
+          "--reaction-rotation": `${particle.rotation}deg`,
+        } as CSSProperties}
+      >{burst.emoji}</span>))}
+    </div>
+    <div className="reaction-dock glass-panel" role="group" aria-label="Canlı tepkiler">
+      {REACTIONS.map((reaction) => <button key={reaction.emoji} type="button" onClick={() => void sendLiveReaction(reaction.emoji)} aria-label={reaction.label} title={reaction.label}>{reaction.emoji}</button>)}
+    </div>
     {renderProfileModal()}
   </main>;
 }
