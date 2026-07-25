@@ -10,7 +10,7 @@
     "service_worker": "assets/background.js",
     "type": "module"
   },
-  "permissions": ["storage", "tabs", "activeTab", "sidePanel", "scripting", "webNavigation"],
+  "permissions": ["storage", "tabs", "activeTab", "sidePanel", "scripting", "webNavigation", "clipboardWrite"],
   "host_permissions": ["<all_urls>"],
   "side_panel": {
     "default_path": "sidepanel/index.html"

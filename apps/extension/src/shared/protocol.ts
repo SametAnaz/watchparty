@@ -5,6 +5,7 @@ export interface PlaybackEvent {
   senderId: string;
   clientId: string;
   logicalClock: number;
+  sentAt: string;
   mediaFingerprint: string | null;
   action: PlaybackAction;
   mediaTime: number;
@@ -31,6 +32,7 @@ export interface TypingEvent {
 
 export interface MessageChangeEvent {
   senderId: string;
-  kind: "message" | "reaction";
+  kind: "message" | "edited" | "deleted" | "reaction";
   changedAt: string;
+  messageId?: string;
 }

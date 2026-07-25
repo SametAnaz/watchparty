@@ -5,6 +5,7 @@ export interface PlaybackEvent {
 	senderId: string;
 	clientId: string;
 	logicalClock: number;
+	sentAt: string;
 	mediaFingerprint: string | null;
 	action: PlaybackAction;
 	mediaTime: number;
