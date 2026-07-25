@@ -12,7 +12,7 @@ export interface PlaybackEvent {
   paused: boolean;
 }
 
-export type ReactionEmoji = "😂" | "❤️" | "😮" | "😡" | "😭" | "🤠";
+export type ReactionEmoji = string;
 
 export interface ReactionEvent {
   eventId: string;
@@ -20,4 +20,17 @@ export interface ReactionEvent {
   emoji: ReactionEmoji;
   anchorX: number;
   sentAt: string;
+}
+
+export interface TypingEvent {
+  senderId: string;
+  displayName: string;
+  isTyping: boolean;
+  sentAt: string;
+}
+
+export interface MessageChangeEvent {
+  senderId: string;
+  kind: "message" | "reaction";
+  changedAt: string;
 }

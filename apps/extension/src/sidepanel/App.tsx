@@ -4,7 +4,7 @@ import type { Session } from "@supabase/supabase-js";
 import type { RoomPresence } from "@samet-watchparty/shared-types";
 import { RoomRealtime } from "../shared/room-realtime";
 import { supabase } from "../shared/supabase";
-import type { PlaybackEvent, ReactionEmoji, ReactionEvent } from "../shared/protocol";
+import type { MessageChangeEvent, PlaybackEvent, ReactionEmoji, ReactionEvent, TypingEvent } from "../shared/protocol";
 import {
   ArrowLeftIcon,
   Avatar,
@@ -17,6 +17,7 @@ import {
   RefreshIcon,
   ReplyIcon,
   SendIcon,
+  SmileIcon,
   UserIcon,
 } from "./components";
 import "./styles.css";
@@ -54,7 +55,53 @@ const REACTIONS: { emoji: ReactionEmoji; label: string }[] = [
   { emoji: "😭", label: "Ağlama" },
   { emoji: "🤠", label: "Kovboy" },
 ];
-const REACTION_EMOJIS = new Set<ReactionEmoji>(REACTIONS.map((reaction) => reaction.emoji));
+const CHAT_EMOJIS: ReactionEmoji[] = [
+  "😀", "😃", "😄", "😁", "😆", "😅", "😂", "🤣",
+  "😊", "😇", "🙂", "🙃", "😉", "😌", "😍", "🥰",
+  "😘", "😋", "😎", "🤩", "🥳", "😏", "😒", "😔",
+  "😢", "😭", "😡", "🤬", "🤯", "😱", "😮", "🤔",
+  "🫡", "🤭", "🫢", "🫣", "🤗", "🫠", "🥹", "😴",
+  "👍", "👎", "👏", "🙌", "🙏", "💪", "🤝", "👌",
+  "✌️", "🤞", "🫶", "👀", "💋", "💯", "✨", "🔥",
+  "❤️", "🧡", "💛", "💚", "💙", "💜", "🖤", "🤍",
+  "💔", "💕", "💖", "💘", "🎉", "🎊", "🥂", "🍿",
+  "🎬", "🎵", "🌙", "⭐", "☀️", "🌈", "🐱", "🐶",
+  "🙈", "🙉", "🙊", "💩", "👻", "🤖", "🤠", "👑",
+];
+const REACTION_EMOJIS = new Set<ReactionEmoji>([...CHAT_EMOJIS, ...REACTIONS.map((reaction) => reaction.emoji)]);
+const EMOJI_USAGE_STORAGE_KEY = "watchpartyEmojiUsage";
+const EMOJI_DEFAULT_ORDER = new Map(CHAT_EMOJIS.map((emoji, index) => [emoji, index]));
+let notificationAudioContext: AudioContext | null = null;
+
+function sortChatEmojis(usage: Record<string, number>) {
+  return [...CHAT_EMOJIS].sort((first, second) => {
+    const weightDifference = (usage[second] ?? 0) - (usage[first] ?? 0);
+    return weightDifference || (EMOJI_DEFAULT_ORDER.get(first) ?? 0) - (EMOJI_DEFAULT_ORDER.get(second) ?? 0);
+  });
+}
+
+function playMessageSound() {
+  try {
+    notificationAudioContext ??= new AudioContext();
+    const context = notificationAudioContext;
+    void context.resume();
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    const now = context.currentTime;
+    oscillator.type = "sine";
+    oscillator.frequency.setValueAtTime(720, now);
+    oscillator.frequency.exponentialRampToValueAtTime(920, now + 0.09);
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(0.035, now + 0.012);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.12);
+    oscillator.connect(gain);
+    gain.connect(context.destination);
+    oscillator.start(now);
+    oscillator.stop(now + 0.13);
+  } catch {
+    // Audio can remain blocked until the user first interacts with the side panel.
+  }
+}
 
 function displayNameFromEmail(email: string | undefined) {
   return email?.split("@")[0]?.trim() || "Watchparty kullanıcısı";
@@ -104,7 +151,6 @@ export function App() {
   const [rooms, setRooms] = useState<Room[]>([]);
   const [activeRoom, setActiveRoom] = useState<Room | null>(null);
   const [members, setMembers] = useState<Profile[]>([]);
-  const [membersOpen, setMembersOpen] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [hasOlderMessages, setHasOlderMessages] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -124,6 +170,10 @@ export function App() {
   const [profileSaving, setProfileSaving] = useState(false);
   const [profileNotice, setProfileNotice] = useState<string | null>(null);
   const [reactionBursts, setReactionBursts] = useState<ReactionBurst[]>([]);
+  const [typingUsers, setTypingUsers] = useState<Record<string, string>>({});
+  const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
+  const [holdingEmoji, setHoldingEmoji] = useState<ReactionEmoji | null>(null);
+  const [orderedChatEmojis, setOrderedChatEmojis] = useState<ReactionEmoji[]>(CHAT_EMOJIS);
 
   const realtime = useRef(new RoomRealtime());
   const logicalClock = useRef(0);
@@ -138,8 +188,17 @@ export function App() {
   const scrollToBottomRef = useRef(true);
   const restoreScrollRef = useRef<{ height: number; top: number } | null>(null);
   const profileMenuRef = useRef<HTMLDivElement | null>(null);
+  const emojiPickerRef = useRef<HTMLDivElement | null>(null);
+  const messageInputRef = useRef<HTMLInputElement | null>(null);
   const objectUrlRef = useRef<string | null>(null);
   const reactionTimersRef = useRef<number[]>([]);
+  const typingExpiryTimersRef = useRef(new Map<string, number>());
+  const localTypingStopTimerRef = useRef<number | undefined>(undefined);
+  const lastTypingSentAtRef = useRef(0);
+  const emojiHoldTimerRef = useRef<number | undefined>(undefined);
+  const emojiHoldTriggeredRef = useRef(false);
+  const emojiUsageRef = useRef<Record<string, number>>({});
+  const emojiPickerOpenRef = useRef(false);
 
   const activeRoomId = activeRoom?.id;
   const currentUserId = session?.user.id;
@@ -231,13 +290,13 @@ export function App() {
 
   const showReaction = useCallback((event: ReactionEvent) => {
     if (!REACTION_EMOJIS.has(event.emoji)) return;
-    const anchorX = 50;
+    const anchorX = event.senderId === currentUserId ? 82 : 18;
     const burstId = `${event.eventId}:${crypto.randomUUID()}`;
     const particles = Array.from({ length: 6 }, (_, index): ReactionParticle => ({
       x: (Math.random() - 0.5) * 34,
       drift: (Math.random() - 0.5) * 86,
       delay: index * 45 + Math.random() * 90,
-      duration: 1450 + Math.random() * 650,
+      duration: 1950 + Math.random() * 650,
       size: 20 + Math.random() * 13,
       rotation: (Math.random() - 0.5) * 48,
     }));
@@ -245,34 +304,122 @@ export function App() {
     const timer = window.setTimeout(() => {
       setReactionBursts((bursts) => bursts.filter((burst) => burst.burstId !== burstId));
       reactionTimersRef.current = reactionTimersRef.current.filter((item) => item !== timer);
-    }, 2600);
+    }, 3200);
     reactionTimersRef.current.push(timer);
-  }, []);
+  }, [currentUserId]);
+
+  const handleTyping = useCallback((event: TypingEvent) => {
+    if (!event?.senderId || event.senderId === currentUserId) return;
+    const previousTimer = typingExpiryTimersRef.current.get(event.senderId);
+    if (previousTimer !== undefined) window.clearTimeout(previousTimer);
+
+    if (!event.isTyping) {
+      typingExpiryTimersRef.current.delete(event.senderId);
+      setTypingUsers((users) => {
+        const next = { ...users };
+        delete next[event.senderId];
+        return next;
+      });
+      return;
+    }
+
+    setTypingUsers((users) => ({ ...users, [event.senderId]: event.displayName || "Birisi" }));
+    const timer = window.setTimeout(() => {
+      typingExpiryTimersRef.current.delete(event.senderId);
+      setTypingUsers((users) => {
+        const next = { ...users };
+        delete next[event.senderId];
+        return next;
+      });
+    }, 2600);
+    typingExpiryTimersRef.current.set(event.senderId, timer);
+  }, [currentUserId]);
 
   useEffect(() => {
     let mounted = true;
-    void supabase.auth.getSession().then(async ({ data, error: sessionError }) => {
+    let recoveringSession = false;
+    const recoverSession = async () => {
+      if (!mounted || recoveringSession || document.visibilityState === "hidden") return;
+      recoveringSession = true;
+      try {
+        const { data, error: recoveryError } = await supabase.auth.getSession();
+        if (recoveryError) throw recoveryError;
+        if (mounted) setSession(data.session);
+      } catch (recoveryError) {
+        console.warn("[Watchparty Auth] session recovery failed", recoveryError);
+      } finally {
+        recoveringSession = false;
+      }
+    };
+    void supabase.auth.getSession()
+      .then(async ({ data, error: sessionError }) => {
+        if (!mounted) return;
+        if (sessionError) console.warn("[Watchparty Auth] stored session could not be read", sessionError);
+        setSession(data.session);
+        setLoading(false);
+        if (data.session) {
+          try {
+            await ensureProfile(data.session);
+            await Promise.all([loadProfiles(), loadRooms(data.session.user.id)]);
+          } catch (initError) {
+            console.error("Watchparty initialization failed", initError);
+          }
+        }
+      })
+      .catch((sessionError) => {
+        console.error("Watchparty session initialization failed", sessionError);
+        if (mounted) {
+          setLoading(false);
+        }
+      });
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => { if (mounted) setSession(nextSession); });
+    const handleVisibility = () => { if (document.visibilityState === "visible") void recoverSession(); };
+    const handleForeground = () => { void recoverSession(); };
+    const recoveryTimer = window.setInterval(() => { void recoverSession(); }, 10 * 60 * 1000);
+    document.addEventListener("visibilitychange", handleVisibility);
+    window.addEventListener("focus", handleForeground);
+    window.addEventListener("online", handleForeground);
+    return () => {
+      mounted = false;
+      window.clearInterval(recoveryTimer);
+      document.removeEventListener("visibilitychange", handleVisibility);
+      window.removeEventListener("focus", handleForeground);
+      window.removeEventListener("online", handleForeground);
+      listener.subscription.unsubscribe();
+    };
+  }, [loadProfiles, loadRooms]);
+
+  useEffect(() => {
+    let mounted = true;
+    void chrome.storage.local.get(EMOJI_USAGE_STORAGE_KEY).then((result) => {
       if (!mounted) return;
-      if (sessionError) setError(sessionError.message);
-      setSession(data.session);
-      setLoading(false);
-      if (data.session) {
-        try {
-          await ensureProfile(data.session);
-          await Promise.all([loadProfiles(), loadRooms(data.session.user.id)]);
-        } catch (initError) {
-          console.error("Watchparty initialization failed", initError);
-          if (mounted) setError(messageFromError(initError));
+      const stored = result[EMOJI_USAGE_STORAGE_KEY];
+      const restored: Record<string, number> = {};
+      if (stored && typeof stored === "object") {
+        for (const emoji of CHAT_EMOJIS) {
+          const weight = (stored as Record<string, unknown>)[emoji];
+          if (typeof weight === "number" && Number.isFinite(weight) && weight > 0) restored[emoji] = Math.floor(weight);
         }
       }
+      const merged = { ...restored };
+      for (const [emoji, weight] of Object.entries(emojiUsageRef.current)) {
+        merged[emoji] = (merged[emoji] ?? 0) + weight;
+      }
+      emojiUsageRef.current = merged;
+      if (!emojiPickerOpenRef.current) setOrderedChatEmojis(sortChatEmojis(merged));
+    }).catch((storageError) => {
+      console.warn("[Watchparty Emoji] usage history could not be loaded", storageError);
     });
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => { if (mounted) setSession(nextSession); });
-    return () => { mounted = false; listener.subscription.unsubscribe(); };
-  }, [loadProfiles, loadRooms]);
+    return () => { mounted = false; };
+  }, []);
 
   useEffect(() => {
     const closeMenu = (event: PointerEvent) => {
       if (profileMenuRef.current && !profileMenuRef.current.contains(event.target as Node)) setProfileMenuOpen(false);
+      if (emojiPickerRef.current && !emojiPickerRef.current.contains(event.target as Node)) {
+        emojiPickerOpenRef.current = false;
+        setEmojiPickerOpen(false);
+      }
     };
     document.addEventListener("pointerdown", closeMenu);
     return () => document.removeEventListener("pointerdown", closeMenu);
@@ -281,6 +428,9 @@ export function App() {
   useEffect(() => () => {
     if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
     for (const timer of reactionTimersRef.current) window.clearTimeout(timer);
+    for (const timer of typingExpiryTimersRef.current.values()) window.clearTimeout(timer);
+    if (localTypingStopTimerRef.current !== undefined) window.clearTimeout(localTypingStopTimerRef.current);
+    if (emojiHoldTimerRef.current !== undefined) window.clearTimeout(emojiHoldTimerRef.current);
   }, []);
 
   useEffect(() => {
@@ -288,6 +438,14 @@ export function App() {
     messageLimitRef.current = MESSAGE_PAGE_SIZE;
     scrollToBottomRef.current = true;
     setReplyingTo(null);
+    setTypingUsers({});
+    emojiPickerOpenRef.current = false;
+    setEmojiPickerOpen(false);
+    for (const timer of typingExpiryTimersRef.current.values()) window.clearTimeout(timer);
+    typingExpiryTimersRef.current.clear();
+    if (localTypingStopTimerRef.current !== undefined) window.clearTimeout(localTypingStopTimerRef.current);
+    localTypingStopTimerRef.current = undefined;
+    lastTypingSentAtRef.current = 0;
     const initialPresence: RoomPresence = {
       userId: currentUserId,
       displayName: currentDisplayNameRef.current,
@@ -299,7 +457,9 @@ export function App() {
       pageUrl: null,
       joinedAt: presenceJoinedAt,
     };
-    void Promise.all([loadMembers(activeRoomId), loadMessages(activeRoomId)]).catch((loadError) => setError(messageFromError(loadError)));
+    void Promise.all([loadMembers(activeRoomId), loadMessages(activeRoomId)]).catch((loadError) => {
+      console.warn("[Watchparty Room] initial room data could not be loaded", loadError);
+    });
     void realtime.current.connect(
       activeRoomId,
       initialPresence,
@@ -317,13 +477,19 @@ export function App() {
         }
       },
       (state) => setPresence(uniquePresence(state)),
-      () => {
+      (event) => {
         const list = messageListRef.current;
         scrollToBottomRef.current = !list || list.scrollHeight - list.scrollTop - list.clientHeight < 96;
-        void loadMessages(activeRoomId).catch((loadError) => setError(messageFromError(loadError)));
+        if (event?.kind === "message" && event.senderId !== currentUserId) playMessageSound();
+        void loadMessages(activeRoomId).catch((loadError) => {
+          console.warn("[Watchparty Chat] messages could not be refreshed", loadError);
+        });
       },
       showReaction,
-    ).catch((connectError) => setError(messageFromError(connectError)));
+      handleTyping,
+    ).catch((connectError) => {
+      console.warn("[Watchparty Live] room connection failed", connectError);
+    });
     void chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
       if (tab?.id === undefined) return;
       activeTabId.current = tab.id;
@@ -331,7 +497,7 @@ export function App() {
       return chrome.runtime.sendMessage({ type: "WATCHPARTY_ENSURE_CONTENT", tabId: tab.id });
     });
     return () => { void realtime.current.disconnect(); };
-  }, [activeRoomId, currentUserId, loadMembers, loadMessages, showReaction]);
+  }, [activeRoomId, currentUserId, handleTyping, loadMembers, loadMessages, showReaction]);
 
   useEffect(() => {
     if (!currentUserId || !activeRoomId) return;
@@ -370,7 +536,9 @@ export function App() {
           mediaTitle: nextMedia.title,
           pageUrl: nextMedia.pageUrl,
           joinedAt: presenceJoinedAt,
-        }).catch((presenceError) => setError(messageFromError(presenceError)));
+        }).catch((presenceError) => {
+          console.warn("[Watchparty Presence] media status could not be sent", presenceError);
+        });
         const pendingPlayback = pendingRemotePlaybackRef.current;
         if (pendingPlayback && nextMedia.detected && activeTabId.current !== undefined) {
           const samePendingMedia = !pendingPlayback.mediaFingerprint || pendingPlayback.mediaFingerprint === nextMedia.fingerprint;
@@ -395,9 +563,13 @@ export function App() {
           playbackRate: Number(event.playbackRate ?? 1),
           paused: Boolean(event.paused),
         };
-        void realtime.current.sendPlayback(playback).catch((sendError) => setError(messageFromError(sendError)));
+        void realtime.current.sendPlayback(playback).catch((sendError) => {
+          console.warn("[Watchparty Playback] event could not be sent", sendError);
+        });
       }
-      if (event.type === "WATCHPARTY_MEDIA_ERROR") setError(String(event.message ?? "Bu sekmede medya algılanamadı."));
+      if (event.type === "WATCHPARTY_MEDIA_ERROR") {
+        console.warn("[Watchparty Media]", String(event.message ?? "Bu sekmede medya algılanamadı."));
+      }
     };
     chrome.runtime.onMessage.addListener(listener);
     return () => chrome.runtime.onMessage.removeListener(listener);
@@ -418,8 +590,20 @@ export function App() {
       }
       void chrome.runtime.sendMessage({ type: "WATCHPARTY_ENSURE_CONTENT", tabId }).catch(() => undefined);
     };
+    const handleUpdated = (tabId: number, changeInfo: chrome.tabs.TabChangeInfo) => {
+      if (changeInfo.status !== "complete" || tabId !== activeTabId.current) return;
+      activeFrameId.current = undefined;
+      mediaReadyRef.current = false;
+      const joinedMedia = joinedMediaRef.current;
+      if (joinedMedia?.tabId === tabId) joinedMedia.pageUrl = null;
+      void chrome.runtime.sendMessage({ type: "WATCHPARTY_ENSURE_CONTENT", tabId }).catch(() => undefined);
+    };
     chrome.tabs.onActivated.addListener(handleActivated);
-    return () => chrome.tabs.onActivated.removeListener(handleActivated);
+    chrome.tabs.onUpdated.addListener(handleUpdated);
+    return () => {
+      chrome.tabs.onActivated.removeListener(handleActivated);
+      chrome.tabs.onUpdated.removeListener(handleUpdated);
+    };
   }, []);
 
   useLayoutEffect(() => {
@@ -450,7 +634,7 @@ export function App() {
   async function createRoom(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!selectedUserId || !roomName.trim()) return;
-    setSubmitting(true); setError(null);
+    setSubmitting(true);
     try {
       const { data, error: createError } = await supabase.rpc("create_room", { p_name: roomName.trim(), p_member_id: selectedUserId });
       if (createError) throw createError;
@@ -460,7 +644,7 @@ export function App() {
       if (roomError) throw roomError;
       await loadRooms(session!.user.id);
       setActiveRoom(created as Room); setRoomName(""); setSelectedUserId("");
-    } catch (createFailure) { setError(messageFromError(createFailure)); }
+    } catch (createFailure) { console.warn("[Watchparty Room] room could not be created", createFailure); }
     finally { setSubmitting(false); }
   }
 
@@ -469,30 +653,135 @@ export function App() {
     if (!activeRoom || !messageBody.trim() || !session) return;
     const body = messageBody.trim();
     const replyTo = replyingTo?.id ?? null;
+    stopTyping();
     setMessageBody(""); setReplyingTo(null); scrollToBottomRef.current = true;
     const { error: insertError } = await supabase.from("messages").insert({ room_id: activeRoom.id, sender_id: session.user.id, type: "text", body, reply_to: replyTo });
-    if (insertError) { setError(messageFromError(insertError)); setMessageBody(body); return; }
+    if (insertError) {
+      console.warn("[Watchparty Chat] message could not be sent", insertError);
+      setMessageBody(body);
+      return;
+    }
     await loadMessages(activeRoom.id);
-    await notifyMessageChange();
+    await notifyMessageChange("message");
   }
 
-  async function notifyMessageChange() {
-    await realtime.current.notifyMessageChange().catch((notifyError) => {
+  async function notifyMessageChange(kind: MessageChangeEvent["kind"]) {
+    if (!session) return;
+    await realtime.current.notifyMessageChange({
+      senderId: session.user.id,
+      kind,
+      changedAt: new Date().toISOString(),
+    }).catch((notifyError) => {
       console.warn("[Watchparty Chat] refresh notification failed", notifyError);
     });
+  }
+
+  function sendTypingState(isTyping: boolean) {
+    if (!session || !activeRoom) return;
+    if (isTyping) lastTypingSentAtRef.current = Date.now();
+    const event: TypingEvent = {
+      senderId: session.user.id,
+      displayName: currentDisplayName,
+      isTyping,
+      sentAt: new Date().toISOString(),
+    };
+    void realtime.current.sendTyping(event).catch((typingError) => {
+      console.warn("[Watchparty Chat] typing notification failed", typingError);
+    });
+  }
+
+  function stopTyping() {
+    if (localTypingStopTimerRef.current !== undefined) {
+      window.clearTimeout(localTypingStopTimerRef.current);
+      localTypingStopTimerRef.current = undefined;
+    }
+    if (lastTypingSentAtRef.current > 0) sendTypingState(false);
+    lastTypingSentAtRef.current = 0;
+  }
+
+  function updateMessageBody(value: string) {
+    setMessageBody(value);
+    if (!value.trim()) {
+      stopTyping();
+      return;
+    }
+    if (Date.now() - lastTypingSentAtRef.current >= 1000) sendTypingState(true);
+    if (localTypingStopTimerRef.current !== undefined) window.clearTimeout(localTypingStopTimerRef.current);
+    localTypingStopTimerRef.current = window.setTimeout(stopTyping, 1400);
+  }
+
+  function insertEmoji(emoji: ReactionEmoji) {
+    const input = messageInputRef.current;
+    const selectionStart = input?.selectionStart ?? messageBody.length;
+    const selectionEnd = input?.selectionEnd ?? selectionStart;
+    const nextValue = `${messageBody.slice(0, selectionStart)}${emoji}${messageBody.slice(selectionEnd)}`;
+    if (nextValue.length > 4000) return;
+    recordEmojiUsage(emoji);
+    updateMessageBody(nextValue);
+    window.requestAnimationFrame(() => {
+      const nextCursor = selectionStart + emoji.length;
+      input?.focus();
+      input?.setSelectionRange(nextCursor, nextCursor);
+    });
+  }
+
+  function cancelEmojiHold() {
+    if (emojiHoldTimerRef.current !== undefined) window.clearTimeout(emojiHoldTimerRef.current);
+    emojiHoldTimerRef.current = undefined;
+    setHoldingEmoji(null);
+  }
+
+  function startEmojiHold(emoji: ReactionEmoji) {
+    cancelEmojiHold();
+    emojiHoldTriggeredRef.current = false;
+    setHoldingEmoji(emoji);
+    emojiHoldTimerRef.current = window.setTimeout(() => {
+      emojiHoldTimerRef.current = undefined;
+      emojiHoldTriggeredRef.current = true;
+      setHoldingEmoji(null);
+      void sendLiveReaction(emoji);
+    }, 1000);
+  }
+
+  function finishEmojiHold(emoji: ReactionEmoji) {
+    const wasLongPress = emojiHoldTriggeredRef.current;
+    cancelEmojiHold();
+    emojiHoldTriggeredRef.current = false;
+    if (!wasLongPress) insertEmoji(emoji);
+  }
+
+  function recordEmojiUsage(emoji: ReactionEmoji) {
+    if (!REACTION_EMOJIS.has(emoji)) return;
+    const next = {
+      ...emojiUsageRef.current,
+      [emoji]: Math.min((emojiUsageRef.current[emoji] ?? 0) + 1, 999_999),
+    };
+    emojiUsageRef.current = next;
+    void chrome.storage.local.set({ [EMOJI_USAGE_STORAGE_KEY]: next }).catch((storageError) => {
+      console.warn("[Watchparty Emoji] usage history could not be saved", storageError);
+    });
+  }
+
+  function toggleEmojiPicker() {
+    const willOpen = !emojiPickerOpen;
+    if (willOpen) setOrderedChatEmojis(sortChatEmojis(emojiUsageRef.current));
+    emojiPickerOpenRef.current = willOpen;
+    setEmojiPickerOpen(willOpen);
   }
 
   async function toggleLike(message: Message) {
     if (!session || !activeRoom) return;
     if (message.sender_id === session.user.id) return;
-    setError(null);
     const query = supabase.from("message_reactions");
     const { error: reactionError } = message.likedByMe
       ? await query.delete().eq("message_id", message.id).eq("user_id", session.user.id).eq("reaction", "like")
       : await query.insert({ message_id: message.id, user_id: session.user.id, reaction: "like" });
-    if (reactionError) { setError(messageFromError(reactionError)); return; }
+    if (reactionError) {
+      console.warn("[Watchparty Chat] message reaction could not be updated", reactionError);
+      return;
+    }
     await loadMessages(activeRoom.id);
-    await notifyMessageChange();
+    await notifyMessageChange("reaction");
   }
 
   async function loadOlderMessages() {
@@ -502,23 +791,23 @@ export function App() {
     setLoadingOlder(true);
     messageLimitRef.current += MESSAGE_PAGE_SIZE;
     try { await loadMessages(activeRoom.id); }
-    catch (loadError) { setError(messageFromError(loadError)); }
+    catch (loadError) { console.warn("[Watchparty Chat] older messages could not be loaded", loadError); }
     finally { setLoadingOlder(false); }
   }
 
   async function sendLiveReaction(emoji: ReactionEmoji) {
     if (!session || !activeRoom) return;
+    recordEmojiUsage(emoji);
     const event: ReactionEvent = {
       eventId: crypto.randomUUID(),
       senderId: session.user.id,
       emoji,
-      anchorX: 50,
+      anchorX: 82,
       sentAt: new Date().toISOString(),
     };
     showReaction(event);
     await realtime.current.sendReaction(event).catch((reactionError) => {
       console.warn("[Watchparty Reaction] delivery failed", reactionError);
-      setError(messageFromError(reactionError));
     });
   }
 
@@ -604,25 +893,24 @@ export function App() {
   }
 
   async function refreshProfiles() {
-    try { setError(null); await loadProfiles(); }
-    catch (refreshError) { setError(messageFromError(refreshError)); }
+    try { await loadProfiles(); }
+    catch (refreshError) { console.warn("[Watchparty Profiles] profiles could not be refreshed", refreshError); }
   }
 
   async function refreshRooms() {
     if (!session) return;
-    try { setError(null); await loadRooms(session.user.id); }
-    catch (refreshError) { setError(messageFromError(refreshError)); }
+    try { await loadRooms(session.user.id); }
+    catch (refreshError) { console.warn("[Watchparty Room] room list could not be refreshed", refreshError); }
   }
 
   async function refreshMedia() {
     try {
-      setError(null);
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (tab?.id === undefined) throw new Error("Aktif sekme bulunamadı.");
       activeTabId.current = tab.id;
       mediaReadyRef.current = false;
       await chrome.runtime.sendMessage({ type: "WATCHPARTY_ENSURE_CONTENT", tabId: tab.id });
-    } catch (refreshError) { setError(messageFromError(refreshError)); }
+    } catch (refreshError) { console.warn("[Watchparty Media] media could not be refreshed", refreshError); }
   }
 
   async function joinRemoteMedia(pageUrl: string, mediaFingerprint: string | null) {
@@ -637,28 +925,36 @@ export function App() {
       if (tab.id === undefined) throw new Error("Yeni medya sekmesi açılamadı.");
       activeTabId.current = tab.id;
       if (joinedMediaRef.current) joinedMediaRef.current.tabId = tab.id;
-    } catch (joinError) { setError(messageFromError(joinError)); }
+    } catch (joinError) { console.warn("[Watchparty Media] remote media could not be opened", joinError); }
   }
 
   function renderHeader(title: string, showBack = false) {
+    const onlineRoomMembers = showBack
+      ? members.filter((member) => member.id !== currentUserId && presence.some((item) => item.userId === member.id))
+      : [];
     return (
-      <header className="topbar glass-panel">
+      <header className={`topbar glass-panel${showBack ? " topbar-room" : ""}`}>
         <div className="topbar-leading">
           {showBack
             ? <button className="ghost-icon-button" type="button" onClick={() => setActiveRoom(null)} aria-label="Odalara dön"><ArrowLeftIcon size={21} /></button>
             : <span className="brand-mark">S</span>}
-          <div className="brand-copy"><span>Samet</span><strong>{title}</strong></div>
+          <div className="brand-copy"><strong>{title}</strong></div>
         </div>
-        <div className="profile-menu" ref={profileMenuRef}>
-          <button className="profile-trigger" type="button" onClick={() => setProfileMenuOpen((open) => !open)} aria-label="Profil menüsü" aria-expanded={profileMenuOpen}>
-            <Avatar name={currentDisplayName} url={currentProfile?.avatar_url} size="small" />
-            <ChevronDownIcon size={14} />
-          </button>
-          {profileMenuOpen && <div className="profile-dropdown glass-panel">
-            <div className="dropdown-identity"><strong>{currentDisplayName}</strong><span>{session?.user.email}</span></div>
-            <button type="button" onClick={openProfileEditor}><PencilIcon />Profili düzenle</button>
-            <button type="button" className="danger-menu-item" onClick={() => void signOut()}><LogOutIcon />Çıkış yap</button>
+        <div className="topbar-actions">
+          {onlineRoomMembers.length > 0 && <div className="online-members" aria-label="Çevrimiçi üyeler">
+            {onlineRoomMembers.map((member) => <Avatar key={member.id} name={`${member.display_name} · Çevrimiçi`} url={member.avatar_url} size="small" status="online" />)}
           </div>}
+          <div className="profile-menu" ref={profileMenuRef}>
+            <button className="profile-trigger" type="button" onClick={() => setProfileMenuOpen((open) => !open)} aria-label="Profil menüsü" aria-expanded={profileMenuOpen}>
+              <Avatar name={currentDisplayName} url={currentProfile?.avatar_url} size="small" status={showBack ? "online" : undefined} />
+              <ChevronDownIcon size={14} />
+            </button>
+            {profileMenuOpen && <div className="profile-dropdown glass-panel">
+              <div className="dropdown-identity"><strong>{currentDisplayName}</strong><span>{session?.user.email}</span></div>
+              <button type="button" onClick={openProfileEditor}><PencilIcon />Profili düzenle</button>
+              <button type="button" className="danger-menu-item" onClick={() => void signOut()}><LogOutIcon />Çıkış yap</button>
+            </div>}
+          </div>
         </div>
       </header>
     );
@@ -696,25 +992,18 @@ export function App() {
     <section className="welcome-panel"><span className="section-kicker">Oturumlar</span><h1>Odaların</h1><p>Arkadaşını seç, odanı aç ve oynatmayı eşitle.</p></section>
     <section className="card glass-panel"><div className="section-head"><div><span className="section-kicker">Yeni</span><h2>Oda oluştur</h2></div><button className="ghost-icon-button" type="button" onClick={() => void refreshProfiles()} aria-label="Kullanıcıları yenile"><RefreshIcon /></button></div><form className="auth-form" onSubmit={(event) => void createRoom(event)}><label>Oda adı<input value={roomName} onChange={(event) => setRoomName(event.target.value)} placeholder="Film gecesi" required /></label><label>Arkadaş<select value={selectedUserId} onChange={(event) => setSelectedUserId(event.target.value)} required><option value="">Bir kullanıcı seç</option>{otherProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.display_name}</option>)}</select></label><button className="primary-button" disabled={submitting || !otherProfiles.length}>{submitting ? "Oluşturuluyor…" : "Oda oluştur"}</button></form>{!otherProfiles.length && <p className="muted">Arkadaşın bir kez giriş yaptığında burada görünür.</p>}</section>
     <section className="card glass-panel"><div className="section-head"><div><span className="section-kicker">Kayıtlı</span><h2>Mevcut odalar</h2></div><div className="section-actions"><span className="pill">{rooms.length}</span><button className="ghost-icon-button" type="button" onClick={() => void refreshRooms()} aria-label="Odaları yenile"><RefreshIcon /></button></div></div><div className="room-list">{rooms.map((room) => <button className="room-button" key={room.id} onClick={() => setActiveRoom(room)}><span className="room-monogram">{room.name[0]?.toLocaleUpperCase("tr-TR")}</span><span className="room-copy"><strong>{room.name}</strong><small>{new Date(room.created_at).toLocaleDateString("tr-TR")}</small></span><ChevronDownIcon className="room-arrow" size={17} /></button>)}{!rooms.length && <p className="empty-state">Henüz bir odan yok.</p>}</div></section>
-    {error && <p className="form-error">{error}</p>}
     {renderProfileModal()}
   </main>;
 
   const progress = media.duration ? Math.min(100, (media.mediaTime / media.duration) * 100) : 0;
   const remoteWatcher = presence.find((item) => item.userId !== session.user.id && item.videoDetected && Boolean(item.pageUrl));
+  const chatPartner = members.find((member) => member.id !== session.user.id);
+  const chatPartnerOnline = Boolean(chatPartner && onlineIds.has(chatPartner.id));
   const mediaTitle = remoteWatcher?.mediaTitle || media.title;
   const mediaPageUrl = remoteWatcher?.pageUrl ?? null;
 
   return <main className="shell room-shell">
     {renderHeader(activeRoom.name, true)}
-
-    <section className={`members-card glass-panel${membersOpen ? " open" : ""}`}>
-      <button className="members-summary" type="button" onClick={() => setMembersOpen((open) => !open)} aria-expanded={membersOpen}>
-        <div><span className="section-kicker">Üyeler</span><div className="avatar-stack">{members.map((member) => <Avatar key={member.id} name={member.display_name} url={member.avatar_url} size="small" status={onlineIds.has(member.id) ? "online" : "offline"} />)}</div></div>
-        <div className="members-meta"><span>{presence.length} çevrimiçi</span><ChevronDownIcon /></div>
-      </button>
-      {membersOpen && <div className="member-list">{members.map((member) => <article key={member.id} className="member-row"><Avatar name={member.display_name} url={member.avatar_url} size="small" status={onlineIds.has(member.id) ? "online" : "offline"} /><div><strong>{member.display_name}</strong><p>{onlineIds.has(member.id) ? "Çevrimiçi" : "Çevrimdışı"}</p></div></article>)}</div>}
-    </section>
 
     <section className="media-card glass-panel">
       <div className="section-head"><div><span className="section-kicker">Şu an izleniyor</span><span className={`media-state${media.detected ? " active" : ""}`}>{media.detected ? (media.paused ? "Duraklatıldı" : "Oynatılıyor") : "Medya bekleniyor"}</span></div><button className="ghost-icon-button" type="button" onClick={() => void refreshMedia()} aria-label="Medyayı yenile"><RefreshIcon /></button></div>
@@ -726,7 +1015,13 @@ export function App() {
     </section>
 
     <section className="chat-card glass-panel">
-      <div className="chat-head"><div><span className="section-kicker">Oda sohbeti</span><h2>Mesajlar</h2></div><span className="pill">{messages.length} yüklendi</span></div>
+      <div className="chat-head chat-person">
+        <Avatar name={chatPartner?.display_name ?? "Sohbet"} url={chatPartner?.avatar_url} size="small" status={chatPartnerOnline ? "online" : "offline"} />
+        <div>
+          <h2>{chatPartner?.display_name ?? "Sohbet"}</h2>
+          <span>{chatPartnerOnline ? "Çevrimiçi" : "Çevrimdışı"}</span>
+        </div>
+      </div>
       <div className="message-list" ref={messageListRef} onScroll={(event) => { if (event.currentTarget.scrollTop < 36) void loadOlderMessages(); }}>
         {hasOlderMessages && <button className="load-older" type="button" onClick={() => void loadOlderMessages()} disabled={loadingOlder}>{loadingOlder ? "Yükleniyor…" : "Önceki mesajları yükle"}</button>}
         {messages.map((message) => {
@@ -740,7 +1035,7 @@ export function App() {
                 <p>{message.deleted_at ? "Bu mesaj silindi." : message.body}</p>
               </div>
               {!message.deleted_at && <div className="message-actions">
-                <button type="button" className={message.likeCount > 0 ? "liked" : ""} onClick={() => void toggleLike(message)} disabled={own} aria-label={own ? "Kendi mesajını beğenemezsin" : message.likedByMe ? "Beğeniyi kaldır" : "Mesajı beğen"} title={own ? "Kendi mesajını beğenemezsin" : undefined}><HeartIcon size={14} />{message.likeCount > 0 && <span>{message.likeCount}</span>}</button>
+                <button type="button" className={message.likeCount > 0 ? "liked" : ""} onClick={() => void toggleLike(message)} disabled={own} aria-label={own ? "Kendi mesajını beğenemezsin" : message.likedByMe ? "Beğeniyi kaldır" : "Mesajı beğen"} title={own ? "Kendi mesajını beğenemezsin" : undefined}><HeartIcon size={14} /></button>
                 <button type="button" onClick={() => { setReplyingTo(message); document.getElementById("message")?.focus(); }} aria-label="Mesajı yanıtla"><ReplyIcon size={14} /></button>
               </div>}
             </div>
@@ -749,9 +1044,43 @@ export function App() {
         {!messages.length && <div className="empty-chat"><UserIcon size={22} /><p>İlk mesajı sen gönder.</p></div>}
       </div>
       {replyingTo && <div className="replying-bar"><ReplyIcon size={16} /><div><strong>{replyingTo.author}</strong><span>{replyingTo.body}</span></div><button type="button" onClick={() => setReplyingTo(null)} aria-label="Yanıtı iptal et"><CloseIcon size={16} /></button></div>}
-      <form className="composer" onSubmit={(event) => void sendMessage(event)}><label className="sr-only" htmlFor="message">Mesaj yaz</label><input id="message" value={messageBody} onChange={(event) => setMessageBody(event.target.value)} placeholder={replyingTo ? "Yanıtını yaz…" : "Mesaj yaz…"} maxLength={4000} /><button type="submit" aria-label="Gönder" disabled={!messageBody.trim()}><SendIcon /></button></form>
+      <div className={`typing-indicator${Object.keys(typingUsers).length ? " visible" : ""}`} aria-live="polite">
+        {Object.keys(typingUsers).length > 0 && <>
+          <span className="typing-dots" aria-hidden="true"><i /><i /><i /></span>
+          <span>{Object.values(typingUsers).join(", ")} yazıyor</span>
+        </>}
+      </div>
+      <form className="composer" onSubmit={(event) => void sendMessage(event)}>
+        <div className="emoji-composer" ref={emojiPickerRef}>
+          <button className="emoji-toggle" type="button" onClick={toggleEmojiPicker} aria-label="Emojileri aç" aria-expanded={emojiPickerOpen}><SmileIcon size={20} /></button>
+          {emojiPickerOpen && <section className="emoji-picker glass-panel" aria-label="Emoji seçici">
+            <div className="emoji-picker-head"><strong>Emojiler</strong><span>Dokun: mesaja ekle · 1 sn basılı tut: canlandır</span></div>
+            <div className="emoji-grid">
+              {orderedChatEmojis.map((emoji) => <button
+                className={`emoji-option${holdingEmoji === emoji ? " holding" : ""}`}
+                key={emoji}
+                type="button"
+                onPointerDown={(event) => { if (event.button === 0) { event.preventDefault(); startEmojiHold(emoji); } }}
+                onPointerUp={(event) => { if (event.button === 0) { event.preventDefault(); finishEmojiHold(emoji); } }}
+                onPointerCancel={cancelEmojiHold}
+                onPointerLeave={cancelEmojiHold}
+                onContextMenu={(event) => event.preventDefault()}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    insertEmoji(emoji);
+                  }
+                }}
+                aria-label={`${emoji} emojisi`}
+              >{emoji}</button>)}
+            </div>
+          </section>}
+        </div>
+        <label className="sr-only" htmlFor="message">Mesaj yaz</label>
+        <input ref={messageInputRef} id="message" value={messageBody} onChange={(event) => updateMessageBody(event.target.value)} onBlur={stopTyping} placeholder={replyingTo ? "Yanıtını yaz…" : "Mesaj yaz…"} maxLength={4000} />
+        <button className="send-button" type="submit" aria-label="Gönder" disabled={!messageBody.trim()}><SendIcon /></button>
+      </form>
     </section>
-    {error && <p className="form-error">{error}</p>}
     <div className="reaction-layer" aria-hidden="true">
       {reactionBursts.flatMap((burst) => burst.particles.map((particle, index) => <span
         className="reaction-bubble"

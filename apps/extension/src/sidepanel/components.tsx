@@ -31,6 +31,7 @@ export const PencilIcon = (props: IconProps) => <IconBase {...props}><path d="M1
 export const RefreshIcon = (props: IconProps) => <IconBase {...props}><path d="M20 11a8.1 8.1 0 0 0-14.9-4M4 4v5h5M4 13a8.1 8.1 0 0 0 14.9 4M20 20v-5h-5" /></IconBase>;
 export const ReplyIcon = (props: IconProps) => <IconBase {...props}><path d="m9 17-5-5 5-5M4 12h10a6 6 0 0 1 6 6v1" /></IconBase>;
 export const SendIcon = (props: IconProps) => <IconBase {...props}><path d="m22 2-7 20-4-9-9-4ZM22 2 11 13" /></IconBase>;
+export const SmileIcon = (props: IconProps) => <IconBase {...props}><circle cx="12" cy="12" r="9" /><path d="M8 14s1.5 2 4 2 4-2 4-2M9 9h.01M15 9h.01" /></IconBase>;
 export const UserIcon = (props: IconProps) => <IconBase {...props}><circle cx="12" cy="8" r="4" /><path d="M4 21a8 8 0 0 1 16 0" /></IconBase>;
 
 type AvatarProps = {

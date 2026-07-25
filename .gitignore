@@ -1,6 +1,5 @@
 node_modules/
 dist/
 .supabase/
-.env
 .env.local
 *.tsbuildinfo

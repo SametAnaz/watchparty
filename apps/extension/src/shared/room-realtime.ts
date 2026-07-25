@@ -1,6 +1,6 @@
 import type { RealtimeChannel } from "@supabase/supabase-js";
 import type { RoomPresence } from "@samet-watchparty/shared-types";
-import type { PlaybackEvent, ReactionEvent } from "./protocol";
+import type { MessageChangeEvent, PlaybackEvent, ReactionEvent, TypingEvent } from "./protocol";
 import { supabase } from "./supabase";
 
 export const roomTopic = (roomId: string) => `room:${roomId}`;
@@ -22,8 +22,9 @@ export class RoomRealtime {
     presence: RoomPresence,
     onPlayback: (event: PlaybackEvent) => void,
     onPresence: (state: Record<string, RoomPresence[]>) => void,
-    onMessageChange: () => void,
+    onMessageChange: (event: MessageChangeEvent) => void,
     onReaction: (event: ReactionEvent) => void,
+    onTyping: (event: TypingEvent) => void,
   ) {
     const version = ++this.version;
     await this.removeCurrentChannel();
@@ -44,7 +45,12 @@ export class RoomRealtime {
       .on("broadcast", { event: "reaction" }, ({ payload }) => {
         onReaction(payload as ReactionEvent);
       })
-      .on("broadcast", { event: "message_changed" }, onMessageChange);
+      .on("broadcast", { event: "message_changed" }, ({ payload }) => {
+        onMessageChange(payload as MessageChangeEvent);
+      })
+      .on("broadcast", { event: "typing" }, ({ payload }) => {
+        onTyping(payload as TypingEvent);
+      });
 
     this.channel = channel;
     await new Promise<void>((resolve, reject) => {
@@ -80,12 +86,16 @@ export class RoomRealtime {
     await this.sendPresence();
   }
 
-  async notifyMessageChange() {
-    await this.httpSend("message_changed", { changedAt: new Date().toISOString() });
+  async notifyMessageChange(event: MessageChangeEvent) {
+    await this.httpSend("message_changed", event);
   }
 
   async sendReaction(event: ReactionEvent) {
     await this.httpSend("reaction", event);
+  }
+
+  async sendTyping(event: TypingEvent) {
+    await this.httpSend("typing", event);
   }
 
   async disconnect() {

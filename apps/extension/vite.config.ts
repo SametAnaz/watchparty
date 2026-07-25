@@ -4,8 +4,11 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const rootDir = dirname(fileURLToPath(import.meta.url));
+const workspaceRoot = resolve(rootDir, "../..");
 
 export default defineConfig({
+  root: rootDir,
+  envDir: workspaceRoot,
   plugins: [react()],
   publicDir: "public",
   build: {
